@@ -18,6 +18,7 @@ library
   build-depends:       base
                      , aeson
                      , text
+                     , bytestring
                      , containers
                      , network-uri
                      , servant
@@ -30,4 +31,6 @@ library
                      , mtl
                      , http-client
                      , http-types
+                     , time
+                     , http-client-tls
   default-language:    Haskell2010

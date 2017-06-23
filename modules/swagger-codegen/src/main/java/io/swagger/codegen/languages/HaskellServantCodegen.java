@@ -62,6 +62,9 @@ public class HaskellServantCodegen extends DefaultCodegen implements CodegenConf
         specialCharReplacements.put("\\\\", "Back_Slash");
         specialCharReplacements.put("\\\"", "Double_Quote");
 
+        // Nothing special about underscores
+        specialCharReplacements.remove("_");
+
         // set the output folder here
         outputFolder = "generated-code/haskell-servant";
 
@@ -142,7 +145,9 @@ public class HaskellServantCodegen extends DefaultCodegen implements CodegenConf
         typeMapping.put("char", "Char");
         typeMapping.put("float", "Float");
         typeMapping.put("double", "Double");
-        typeMapping.put("DateTime", "Integer");
+        typeMapping.put("date", "UTCTime");
+        typeMapping.put("dateTime", "UTCTime");
+        typeMapping.put("DateTime", "UTCTime");
         typeMapping.put("file", "FilePath");
         typeMapping.put("number", "Double");
         typeMapping.put("integer", "Int");
@@ -449,6 +454,7 @@ public class HaskellServantCodegen extends DefaultCodegen implements CodegenConf
         op.vendorExtensions.put("x-routeType", joinStrings(" :> ", path));
         op.vendorExtensions.put("x-clientType", joinStrings(" -> ", type));
         op.vendorExtensions.put("x-formName", "Form" + camelize(op.operationId));
+        op.vendorExtensions.put("x-operationId", op.operationId.replaceAll("\\.","_"));
         for(CodegenParameter param : op.formParams) {
             param.vendorExtensions.put("x-formPrefix", camelize(op.operationId, true));
         }
@@ -508,9 +514,11 @@ public class HaskellServantCodegen extends DefaultCodegen implements CodegenConf
         }
 
         // From the model name, compute the prefix for the fields.
-        String prefix = camelize(model.classname, true);
+        String prefix = camelize(model.classname, true) + "_";
         for(CodegenProperty prop : model.vars) {
-            prop.name = toVarName(prefix + camelize(fixOperatorChars(prop.name)));
+            // We don't convert this to camel case because fields are
+            // case-sensitive
+            prop.name = toVarName(prefix + fixOperatorChars(prop.name));
         }
 
         // Create newtypes for things with non-object types

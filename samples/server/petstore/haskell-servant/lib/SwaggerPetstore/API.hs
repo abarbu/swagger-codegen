@@ -5,29 +5,27 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# OPTIONS_GHC
--fno-warn-unused-binds -fno-warn-unused-imports -fcontext-stack=328 #-}
+{-# OPTIONS_GHC -fno-warn-unused-binds -fno-warn-unused-imports #-}
 
 module SwaggerPetstore.API
   -- * Client and Server
   ( ServerConfig(..)
-  , SwaggerPetstoreBackend
+  , SwaggerPetstoreBackend(..)
   , createSwaggerPetstoreClient
   , runSwaggerPetstoreServer
   , runSwaggerPetstoreClient
   , runSwaggerPetstoreClientWithManager
-  , SwaggerPetstoreClient
   -- ** Servant
   , SwaggerPetstoreAPI
   ) where
 
 import SwaggerPetstore.Types
 
-import Control.Monad.Except (ExceptT)
 import Control.Monad.IO.Class
 import Data.Aeson (Value)
 import Data.Coerce (coerce)
@@ -39,16 +37,17 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Exts (IsString(..))
 import GHC.Generics (Generic)
-import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
-import Network.HTTP.Types.Method (methodOptions)
+import Network.HTTP.Client (Manager, defaultManagerSettings, newManager, path, parseRequest_)
+import Network.HTTP.Client.TLS (tlsManagerSettings)
 import qualified Network.Wai.Handler.Warp as Warp
-import Servant (ServantErr, serve)
+import Servant (serve, Handler)
 import Servant.API
 import Servant.API.Verbs (StdMethod(..), Verb)
-import Servant.Client (Scheme(Http), ServantError, client)
+import Servant.Client (Scheme(Http,Https), ServantError, client, ClientM, runClientM, ClientEnv(..))
 import Servant.Common.BaseUrl (BaseUrl(..))
-import Web.HttpApiData
-
+import Data.Time.Clock(UTCTime)
+import qualified Data.ByteString.Char8 as C
+import Web.FormUrlEncoded(FromForm(..), ToForm(..), parseUnique)
 
 
 data FormUpdatePetWithForm = FormUpdatePetWithForm
@@ -56,11 +55,11 @@ data FormUpdatePetWithForm = FormUpdatePetWithForm
   , updatePetWithFormStatus :: Text
   } deriving (Show, Eq, Generic)
 
-instance FromFormUrlEncoded FormUpdatePetWithForm where
-  fromFormUrlEncoded inputs = FormUpdatePetWithForm <$> lookupEither "name" inputs <*> lookupEither "status" inputs
+instance FromForm FormUpdatePetWithForm where
+  fromForm inputs = FormUpdatePetWithForm <$> parseUnique "name" inputs <*> parseUnique "status" inputs
 
-instance ToFormUrlEncoded FormUpdatePetWithForm where
-  toFormUrlEncoded value =
+instance ToForm FormUpdatePetWithForm where
+  toForm value =
     [ ("name", toQueryParam $ updatePetWithFormName value)
     , ("status", toQueryParam $ updatePetWithFormStatus value)
     ]
@@ -69,24 +68,14 @@ data FormUploadFile = FormUploadFile
   , uploadFileFile :: FilePath
   } deriving (Show, Eq, Generic)
 
-instance FromFormUrlEncoded FormUploadFile where
-  fromFormUrlEncoded inputs = FormUploadFile <$> lookupEither "additionalMetadata" inputs <*> lookupEither "file" inputs
+instance FromForm FormUploadFile where
+  fromForm inputs = FormUploadFile <$> parseUnique "additionalMetadata" inputs <*> parseUnique "file" inputs
 
-instance ToFormUrlEncoded FormUploadFile where
-  toFormUrlEncoded value =
+instance ToForm FormUploadFile where
+  toForm value =
     [ ("additionalMetadata", toQueryParam $ uploadFileAdditionalMetadata value)
     , ("file", toQueryParam $ uploadFileFile value)
     ]
-
--- For the form data code generation.
-lookupEither :: FromHttpApiData b => Text -> [(Text, Text)] -> Either String b
-lookupEither key assocs =
-  case lookup key assocs of
-    Nothing -> Left $ "Could not find parameter " <> (T.unpack key) <> " in form data"
-    Just value ->
-      case parseQueryParam value of
-        Left result -> Left $ T.unpack result
-        Right result -> Right $ result
 
 -- | Servant type-level API, generated from the Swagger spec for SwaggerPetstore.
 type SwaggerPetstoreAPI
@@ -112,15 +101,15 @@ type SwaggerPetstoreAPI
     :<|> "user" :> Capture "username" Text :> ReqBody '[JSON] User :> Verb 'PUT 200 '[JSON] () -- 'updateUser' route
 
 -- | Server or client configuration, specifying the host and port to query or serve on.
-data ServerConfig = ServerConfig
-  { configHost :: String  -- ^ Hostname to serve on, e.g. "127.0.0.1"
-  , configPort :: Int      -- ^ Port to serve on, e.g. 8080
+data ServerConfig = ServerConfig {
+    configHttps :: Bool    -- ^ Should we use https, if not http.
+  , configHost :: String  -- ^ Hostname to serve on, e.g. "127.0.0.1"
+  , configPort :: Int     -- ^ Port to serve on, e.g. 8080
   } deriving (Eq, Ord, Show, Read)
 
 -- | List of elements parsed from a query.
-newtype QueryList (p :: CollectionFormat) a = QueryList
-  { fromQueryList :: [a]
-  } deriving (Functor, Applicative, Monad, Foldable, Traversable)
+newtype QueryList (p :: CollectionFormat) a = QueryList { fromQueryList :: [a] }
+  deriving (Functor, Applicative, Monad, Foldable, Traversable)
 
 -- | Formats in which a list can be encoded into a HTTP path.
 data CollectionFormat
@@ -194,25 +183,7 @@ data SwaggerPetstoreBackend m = SwaggerPetstoreBackend
   , updateUser :: Text -> User -> m (){- ^ This can only be done by the logged in user. -}
   }
 
-newtype SwaggerPetstoreClient a = SwaggerPetstoreClient
-  { runClient :: Manager -> BaseUrl -> ExceptT ServantError IO a
-  } deriving Functor
-
-instance Applicative SwaggerPetstoreClient where
-  pure x = SwaggerPetstoreClient (\_ _ -> pure x)
-  (SwaggerPetstoreClient f) <*> (SwaggerPetstoreClient x) =
-    SwaggerPetstoreClient (\manager url -> f manager url <*> x manager url)
-
-instance Monad SwaggerPetstoreClient where
-  (SwaggerPetstoreClient a) >>= f =
-    SwaggerPetstoreClient (\manager url -> do
-      value <- a manager url
-      runClient (f value) manager url)
-
-instance MonadIO SwaggerPetstoreClient where
-  liftIO io = SwaggerPetstoreClient (\_ _ -> liftIO io)
-
-createSwaggerPetstoreClient :: SwaggerPetstoreBackend SwaggerPetstoreClient
+createSwaggerPetstoreClient :: SwaggerPetstoreBackend ClientM
 createSwaggerPetstoreClient = SwaggerPetstoreBackend{..}
   where
     ((coerce -> addPet) :<|>
@@ -237,18 +208,18 @@ createSwaggerPetstoreClient = SwaggerPetstoreBackend{..}
      (coerce -> updateUser)) = client (Proxy :: Proxy SwaggerPetstoreAPI)
 
 -- | Run requests in the SwaggerPetstoreClient monad.
-runSwaggerPetstoreClient :: ServerConfig -> SwaggerPetstoreClient a -> ExceptT ServantError IO a
+runSwaggerPetstoreClient :: ServerConfig -> ClientM a -> IO (Either ServantError a)
 runSwaggerPetstoreClient clientConfig cl = do
-  manager <- liftIO $ newManager defaultManagerSettings
+  manager <- newManager (if configHttps clientConfig then tlsManagerSettings else defaultManagerSettings)
   runSwaggerPetstoreClientWithManager manager clientConfig cl
 
 -- | Run requests in the SwaggerPetstoreClient monad using a custom manager.
-runSwaggerPetstoreClientWithManager :: Manager -> ServerConfig -> SwaggerPetstoreClient a -> ExceptT ServantError IO a
+runSwaggerPetstoreClientWithManager :: Manager -> ServerConfig -> ClientM a -> IO (Either ServantError a)
 runSwaggerPetstoreClientWithManager manager clientConfig cl =
-  runClient cl manager $ BaseUrl Http (configHost clientConfig) (configPort clientConfig) ""
+  runClientM cl (ClientEnv manager $ BaseUrl (if configHttps clientConfig then Https else Http) (configHost clientConfig) (configPort clientConfig) (C.unpack $ path $ parseRequest_ "http://petstore.swagger.io/v2"))
 
 -- | Run the SwaggerPetstore server at the provided host and port.
-runSwaggerPetstoreServer :: MonadIO m => ServerConfig -> SwaggerPetstoreBackend (ExceptT ServantErr IO)  -> m ()
+runSwaggerPetstoreServer :: MonadIO m => ServerConfig -> SwaggerPetstoreBackend Handler  -> m ()
 runSwaggerPetstoreServer ServerConfig{..} backend =
   liftIO $ Warp.runSettings warpSettings $ serve (Proxy :: Proxy SwaggerPetstoreAPI) (serverFromBackend backend)
   where

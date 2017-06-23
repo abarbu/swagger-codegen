@@ -16,9 +16,8 @@ type can be used to create and define servers and clients for the API.
 
 ## Creating a Client
 
-A client can be created via the `createSwaggerPetstoreClient` function, which, if provided with a hostname and a port, will generate
-a client that can be used to access the API if it is being served at that hostname / port combination. For example, if
-`localhost:8080` is serving the SwaggerPetstore API, you can write:
+A client can be created via the `createSwaggerPetstoreClient` function. Clients can be run with runSwaggerPetstoreClient.
+This function takes a bool, is the connection going to be plain or TLS, the hostname, and the port to connect to.
 
 ```haskell
 {-# LANGUAGE RecordWildCards #-}
@@ -27,10 +26,15 @@ import SwaggerPetstore.API
 
 main :: IO ()
 main = do
-  SwaggerPetstoreBackend{..} <- createSwaggerPetstoreClient (ServerConfig "localhost" 8080)
-  -- Any SwaggerPetstore API call can go here.
+  let SwaggerPetstoreBackend{..} = createSwaggerPetstoreClient
+  -- Any SwaggerPetstore API call can go where the return below is. These are executed in the ClientM monad from Servant.
+  a <- runSwaggerPetstoreClient (ServerConfig False "localhost" 8080) (return ())
   return ()
 ```
+
+Note that the client will attempt to follow 301 Moved Permanently responses from
+the server. This can lead to very poor performance. Best to find these redirects
+and directly put in the correct endpoint address.
 
 ## Creating a Server
 
