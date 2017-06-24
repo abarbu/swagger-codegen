@@ -124,6 +124,7 @@ public class HaskellServantCodegen extends DefaultCodegen implements CodegenConf
                 Arrays.asList(
                         "Bool",
                         "String",
+                        "Text",
                         "Int",
                         "Integer",
                         "Float",
@@ -270,7 +271,7 @@ public class HaskellServantCodegen extends DefaultCodegen implements CodegenConf
         } else if (p instanceof MapProperty) {
             MapProperty mp = (MapProperty) p;
             Property inner = mp.getAdditionalProperties();
-            return "Map.Map String " + getTypeDeclaration(inner);
+            return "Map.Map Text " + getTypeDeclaration(inner);
         }
         return fixModelChars(super.getTypeDeclaration(p));
     }
